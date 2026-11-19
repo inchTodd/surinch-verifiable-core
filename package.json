@@ -1,0 +1,46 @@
+{
+  "name": "@surinch/verifiable-core",
+  "version": "0.1.0",
+  "description": "Local-first, zero-dependency verifiable runtime core: receipt.h1 offline verifier, verify_recompute summary-vs-detail reconciler, 3-gate SHA-256 audit chain, and bilingual offline HTML audit report generator.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "surinch-verify": "bin/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "test": "node --test test/verifiable-core.test.mjs"
+  },
+  "keywords": [
+    "verifiable",
+    "audit",
+    "sha256",
+    "receipt",
+    "recompute",
+    "ai-agent",
+    "governance",
+    "local-first",
+    "surinch"
+  ],
+  "homepage": "https://surinch.com",
+  "author": "Shanghai Surinch Network Technology Co., Ltd. (https://surinch.com)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inchTodd/surinch-verifiable-core.git"
+  },
+  "bugs": {
+    "url": "https://github.com/inchTodd/surinch-verifiable-core/issues"
+  }
+}

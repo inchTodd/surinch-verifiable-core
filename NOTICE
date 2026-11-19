@@ -1,0 +1,5 @@
+Surinch DB Guard MCP (@surinch/db-guard-mcp)
+Copyright 2026 Shanghai Surinch Network Technology Co., Ltd. (上海盈尺网络科技有限公司)
+
+This product includes software developed at Surinch (https://surinch.com).
+Zero third-party runtime dependencies; uses Node.js standard library only.
