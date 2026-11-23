@@ -8,6 +8,7 @@ function toFiniteNumber(val) {
 
 /**
  * Deterministic summary-vs-detail reconciler (verify_recompute).
+ * Uses integer scaling to avoid IEEE-754 decimal drift on financial sums and weighted scores.
  * Blocks build/delivery whenever summary != recomputed detail aggregation.
  */
 export function verifyRecompute({ summary, details, rules } = {}) {
@@ -86,7 +87,8 @@ export function verifyRecompute({ summary, details, rules } = {}) {
             if (!valueField || !weightField || !Number.isFinite(weightScale) || weightScale <= 0) {
                 return { ok: false, errorCode: 'INVALID_RULE', verdict: 'INVALID_INPUT', message: `Rule "${summaryKey}" (weighted_sum) requires detailField, weightField, and positive weightScale.` };
             }
-            let total = 0;
+            // Exact scaled integer accumulation eliminates IEEE-754 drift (e.g. 0.2 + 9.3 = 9.499999999999998)
+            let scaledNumerator = 0;
             for (let i = 0; i < details.length; i += 1) {
                 const v = toFiniteNumber(details[i]?.[valueField]);
                 const w = toFiniteNumber(details[i]?.[weightField]);
@@ -98,9 +100,33 @@ export function verifyRecompute({ summary, details, rules } = {}) {
                         message: `details[${i}] has non-finite value/weight for "${summaryKey}".`,
                     };
                 }
-                total += v * (w / weightScale);
+                scaledNumerator += Math.round(v * w * 1e6);
             }
-            recomputed = rule.roundDigits != null ? Number(total.toFixed(rule.roundDigits)) : Math.round(total);
+            const exactTotal = scaledNumerator / (1e6 * weightScale);
+            recomputed = rule.roundDigits != null
+                ? Number(exactTotal.toFixed(rule.roundDigits))
+                : Math.round(exactTotal);
+        }
+
+        if (rule.penalty != null) {
+            const penalty = toFiniteNumber(rule.penalty);
+            if (!Number.isFinite(penalty) || penalty < 0) {
+                return { ok: false, errorCode: 'INVALID_RULE', verdict: 'INVALID_INPUT', message: `Rule "${summaryKey}" penalty must be a non-negative finite number.` };
+            }
+            recomputed -= penalty;
+        }
+
+        if (rule.clampMin != null) {
+            const minVal = toFiniteNumber(rule.clampMin);
+            if (Number.isFinite(minVal)) {
+                recomputed = Math.max(minVal, recomputed);
+            }
+        }
+        if (rule.clampMax != null) {
+            const maxVal = toFiniteNumber(rule.clampMax);
+            if (Number.isFinite(maxVal)) {
+                recomputed = Math.min(maxVal, recomputed);
+            }
         }
 
         const delta = Number(Math.abs(reported - recomputed).toFixed(6));

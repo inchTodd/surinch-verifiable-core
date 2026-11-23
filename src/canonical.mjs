@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-export const CORE_VERSION = '0.1.1';
+export const CORE_VERSION = '0.2.0';
 export const RECEIPT_SCHEMA_VERSION = 'surinch.receipt.h1';
 export const GATE_CHAIN_SCHEMA_VERSION = 'surinch.gate_chain.v1';
 

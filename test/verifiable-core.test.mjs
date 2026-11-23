@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,11 +11,14 @@ import {
     canonicalJson,
     sha256Hex,
     deriveExpectedVerdict,
+    signReceipt,
     verifyReceipt,
+    verifyReceiptWithRerun,
     verifyRecompute,
     GATE_SEQUENCE,
     createGateChain,
     advanceGate,
+    signGateChain,
     verifyGateChain,
     renderAuditReportHtml,
 } from '../src/index.mjs';
@@ -288,6 +292,137 @@ test('Publishable package files contain no local host paths or embedded credenti
         const text = fs.readFileSync(file, 'utf8');
         for (const re of forbidden) {
             assert.equal(re.test(text), false, `Forbidden pattern ${re} matched in ${file}`);
+        }
+    }
+});
+
+test('Audit A2, C1 & S4-2: rerun verification catches forged PASS receipt, decided_at tampering, duplicate gate actors, Ed25519 signing, and exact weighted_sum rounding', async () => {
+    // S4-2: [0, 0, 0, 1, 62] with weights [25, 20, 20, 20, 15] = 9.5 -> must round to 10 (no IEEE-754 9.499999998 drift)
+    const edgeRecompute = verifyRecompute({
+        summary: { totalScore: 10 },
+        details: [
+            { key: 'naming', score: 0, weightPct: 25 },
+            { key: 'comments', score: 0, weightPct: 20 },
+            { key: 'primaryKey', score: 0, weightPct: 20 },
+            { key: 'monitoring', score: 1, weightPct: 20 },
+            { key: 'types', score: 62, weightPct: 15 },
+        ],
+        rules: [{ summaryKey: 'totalScore', op: 'weighted_sum', detailField: 'score', weightField: 'weightPct', weightScale: 100 }],
+    });
+    assert.equal(edgeRecompute.ok, true);
+    assert.equal(edgeRecompute.checks[0].recomputed, 10);
+
+    // B2: weighted_sum with lockPenalty + clampMin: 0
+    const lockRecompute = verifyRecompute({
+        summary: { totalScore: 75 },
+        details: [
+            { key: 'naming', score: 100, weightPct: 25 },
+            { key: 'comments', score: 100, weightPct: 20 },
+            { key: 'primaryKey', score: 100, weightPct: 20 },
+            { key: 'monitoring', score: 100, weightPct: 20 },
+            { key: 'types', score: 100, weightPct: 15 },
+        ],
+        rules: [{ summaryKey: 'totalScore', op: 'weighted_sum', detailField: 'score', weightField: 'weightPct', weightScale: 100, penalty: 25, clampMin: 0 }],
+    });
+    assert.equal(lockRecompute.ok, true);
+    assert.equal(lockRecompute.verdict, 'RECOMPUTE_MATCH');
+
+    // A2: Gate chain blocks duplicate actors AND detects decided_at tampering
+    let chain = createGateChain('run-audit-a2').chain;
+    const g1 = advanceGate(chain, { gateId: GATE_SEQUENCE[0], payload: 'p1', actor: 'alice', decision: 'APPROVE', timestamp: '2026-01-01T00:00:00.000Z' });
+    assert.equal(g1.ok, true);
+    const dupActor = advanceGate(g1.chain, { gateId: GATE_SEQUENCE[1], payload: 'p2', actor: 'Alice', decision: 'APPROVE', timestamp: '2026-01-02T00:00:00.000Z' });
+    assert.equal(dupActor.ok, false);
+    assert.equal(dupActor.errorCode, 'DUPLICATE_GATE_ACTOR');
+
+    const g2 = advanceGate(g1.chain, { gateId: GATE_SEQUENCE[1], payload: 'p2', actor: 'bob', decision: 'APPROVE', timestamp: '2026-01-02T00:00:00.000Z' });
+    const g3 = advanceGate(g2.chain, { gateId: GATE_SEQUENCE[2], payload: 'p3', actor: 'carol', decision: 'APPROVE', timestamp: '2026-01-03T00:00:00.000Z' });
+    assert.equal(verifyGateChain(g3.chain).verdict, 'COMPLETED_VERIFIED');
+
+    const tamperedTime = structuredClone(g3.chain);
+    tamperedTime.gates[0].decided_at = '1999-01-01T00:00:00.000Z';
+    const timeCheck = verifyGateChain(tamperedTime);
+    assert.equal(timeCheck.ok, false);
+    assert.equal(timeCheck.verdict, 'CHAIN_TAMPERED');
+    assert.ok(timeCheck.mismatches.some((m) => m.code === 'GATE_HASH_MISMATCH' && m.index === 0));
+
+    // Ed25519 receipt & gate chain signing
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519', {
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const signedChain = signGateChain(g3.chain, privateKey);
+    const signedChainOk = verifyGateChain(signedChain, { publicKeyPem: publicKey, requireSignature: true });
+    assert.equal(signedChainOk.ok, true);
+    assert.equal(signedChainOk.signatureVerified, true);
+    assert.equal(signedChainOk.verificationMode, 'SIGNED_CHAIN_VERIFIED');
+
+    const forgedUnsigned = verifyGateChain(g3.chain, { publicKeyPem: publicKey, requireSignature: true });
+    assert.equal(forgedUnsigned.ok, false);
+    assert.ok(forgedUnsigned.mismatches.some((m) => m.code === 'MISSING_SIGNATURE'));
+
+    // A2: CLI --rerun catches forged PASS receipt with engine_version=9.9.9-forged
+    const dbGuardPath = path.resolve(__dirname, '..', '..', 'db-guard-mcp', 'src', 'index.mjs');
+    if (fs.existsSync(dbGuardPath)) {
+        const dg = await import(dbGuardPath);
+        const raw = 'CREATE TABLE t (pay_amount FLOAT);\n';
+        const forgedResult = { ok: true, dialect: 'mysql', totalScore: 100, findings: [], counts: { p0: 0, p1: 0, p2: 0 } };
+        const forgedReceipt = {
+            schema_version: RECEIPT_SCHEMA_VERSION,
+            tool: 'ddl_governance_check',
+            dialect: 'mysql',
+            engine_version: '9.9.9-forged',
+            verdict: 'PASS',
+            input_sha256: sha256Hex(raw),
+            output_sha256: sha256Hex(canonicalJson(forgedResult)),
+        };
+
+        // Integrity-only mode explicitly reports INTEGRITY_ONLY
+        const integrityCheck = verifyReceipt({ receipt: forgedReceipt, rawInput: raw, recomputedResult: forgedResult });
+        assert.equal(integrityCheck.verificationMode, 'INTEGRITY_ONLY');
+
+        // Rerun mode catches forged PASS receipt!
+        const rerunBad = await verifyReceiptWithRerun({
+            receipt: forgedReceipt,
+            rawInput: raw,
+            dialect: 'mysql',
+            runEngine: ({ rawInput: sql, dialect }) => ({
+                result: dg.analyzeDdlGovernance(sql, dialect),
+                engineVersion: dg.ENGINE_VERSION,
+            }),
+        });
+        assert.equal(rerunBad.ok, false);
+        assert.equal(rerunBad.verdict, 'TAMPERED_OR_MISMATCH');
+        assert.ok(rerunBad.mismatches.some((m) => m.code === 'ENGINE_VERSION_MISMATCH'));
+        assert.ok(rerunBad.mismatches.some((m) => m.code === 'OUTPUT_HASH_MISMATCH'));
+        assert.ok(rerunBad.mismatches.some((m) => m.code === 'VERDICT_TAMPERED'));
+
+        // Real signed receipt passes CLI --rerun + --public-key!
+        const realResult = dg.analyzeDdlGovernance(raw, 'mysql');
+        const realReceipt = signReceipt(dg.buildReceipt({ tool: 'ddl_governance_check', rawInput: raw, result: realResult, dialect: 'mysql' }), privateKey);
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'surinch-rerun-'));
+        try {
+            const sqlPath = path.join(tmpDir, 'schema.sql');
+            const forgedPath = path.join(tmpDir, 'forged.json');
+            const realPath = path.join(tmpDir, 'real.json');
+            const pubPath = path.join(tmpDir, 'pub.pem');
+            fs.writeFileSync(sqlPath, raw, 'utf8');
+            fs.writeFileSync(forgedPath, JSON.stringify(forgedReceipt, null, 2), 'utf8');
+            fs.writeFileSync(realPath, JSON.stringify(realReceipt, null, 2), 'utf8');
+            fs.writeFileSync(pubPath, publicKey, 'utf8');
+
+            const cliForged = spawnSync(process.execPath, [CLI_PATH, 'receipt', '--receipt', forgedPath, '--input', sqlPath, '--rerun', '--dialect', 'mysql'], { encoding: 'utf8' });
+            assert.equal(cliForged.status, 1, 'Forged PASS receipt must fail --rerun with exit 1');
+            assert.equal(JSON.parse(cliForged.stdout).verdict, 'TAMPERED_OR_MISMATCH');
+
+            const cliReal = spawnSync(process.execPath, [CLI_PATH, 'receipt', '--receipt', realPath, '--input', sqlPath, '--rerun', '--dialect', 'mysql', '--public-key', pubPath], { encoding: 'utf8' });
+            assert.equal(cliReal.status, 0, `Real signed receipt must pass --rerun: ${cliReal.stdout} ${cliReal.stderr}`);
+            const parsedReal = JSON.parse(cliReal.stdout);
+            assert.equal(parsedReal.verdict, 'VERIFIED');
+            assert.equal(parsedReal.verificationMode, 'RERUN_AND_SIGNED_VERIFIED');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
         }
     }
 });

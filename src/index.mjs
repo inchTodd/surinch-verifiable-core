@@ -7,7 +7,7 @@ export {
     sha256Hex,
     deriveExpectedVerdict,
 } from './canonical.mjs';
-export { verifyReceipt } from './receipt-verify.mjs';
+export { signReceipt, verifyReceipt, verifyReceiptWithRerun } from './receipt-verify.mjs';
 export { verifyRecompute } from './recompute.mjs';
-export { GATE_SEQUENCE, createGateChain, advanceGate, verifyGateChain } from './gates.mjs';
+export { GATE_SEQUENCE, createGateChain, advanceGate, signGateChain, verifyGateChain } from './gates.mjs';
 export { renderAuditReportHtml } from './report-html.mjs';

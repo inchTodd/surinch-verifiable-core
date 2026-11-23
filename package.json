@@ -1,6 +1,6 @@
 {
   "name": "@surinch/verifiable-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local-first, zero-dependency verifiable runtime core: receipt.h1 offline verifier, verify_recompute summary-vs-detail reconciler, 3-gate SHA-256 audit chain, and bilingual offline HTML audit report generator.",
   "type": "module",
   "license": "Apache-2.0",
